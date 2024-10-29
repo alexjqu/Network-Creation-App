@@ -1,0 +1,26 @@
+GET request:
+
+    curl http://<url>
+
+To show status code & response headers:
+
+    curl -i http://<url>
+
+To show request & response headers:
+
+    curl -v http://<url>
+
+
+
+
+POST reqest:
+
+    curl -i -X POST http://<url>
+
+POST request with form-encoded data:
+
+    curl -i -X POST -d key1=val1 -d key2=val2 http://<url>
+
+POST request with JSON-encoded data:
+
+    curl -i -X POST -H 'Content-Type: application/json' -d '{"key1": "val1", "key2": "val2"}' http://<url>
