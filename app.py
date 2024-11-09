@@ -10,11 +10,11 @@ def get_db():
     db = getattr(g, '_database', None)
     if db is None:
         db = g._database = sqlite3.connect(DB_FILE)
-
+        
         db.execute('''
             PRAGMA foreign_keys = ON;
             ''')
-
+        
         db.executescript('''
             BEGIN;
             CREATE TABLE IF NOT EXISTS graphs (
@@ -22,7 +22,7 @@ def get_db():
                 name TEXT NOT NULL,
                 owner TEXT,
                 FOREIGN KEY (owner) REFERENCES users (username) ON DELETE CASCADE
-        );
+            );
 
             CREATE TABLE IF NOT EXISTS nodes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -31,7 +31,7 @@ def get_db():
                 pos_x INTEGER NOT NULL,
                 pos_y INTEGER NOT NULL,
                 FOREIGN KEY (graph) REFERENCES graphs (id) ON DELETE CASCADE
-        );
+            );
 
             CREATE TABLE IF NOT EXISTS edges (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -41,53 +41,72 @@ def get_db():
                 FOREIGN KEY (graph) REFERENCES graphs (id) ON DELETE CASCADE
                 FOREIGN KEY (src) REFERENCES nodes (id) ON DELETE CASCADE
                 FOREIGN KEY (dst) REFERENCES nodes (id) ON DELETE CASCADE
-        );
+            );
             
             CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY,
                 username TEXT NOT NULL UNIQUE,
                 password TEXT NOT NULL
-        );
+            );
+
+            INSERT OR IGNORE INTO graphs (id, name) 
+            SELECT 1, 'Default Graph'
+            WHERE NOT EXISTS (SELECT 1 FROM graphs WHERE id = 1);
+
             COMMIT;
         ''')
+        
         db.commit()
     return db
 
-@app.put(API_PREFIX + '/graphs/<graphId>/nodes/<nodeId>')
-def addNode(graphId, name, pos_x, pos_y):
+
+@app.post(API_PREFIX + '/graphs/<graphId>/nodes')
+def addNode(graphId):
+    data = request.json
+    name = data.get('name')
+    pos_x = data.get('pos_x')
+    pos_y = data.get('pos_y')
+    
     cur = get_db().cursor()
     cur.execute("BEGIN;")
     res = cur.execute("SELECT COUNT(id) FROM nodes WHERE graph = ? AND name = ?", (graphId, name))
     if res.fetchone()[0] != 0:
         cur.execute("ROLLBACK;")
         cur.close()
-        return None
+        get_db().commit()
+        return ("Node with that name already exists", 400)
     cur.execute('''
     INSERT INTO nodes (graph, name, pos_x, pos_y) VALUES (?, ?, ?, ?);
     ''', (graphId, name, pos_x, pos_y))
     newNodeId = cur.lastrowid
     cur.execute("COMMIT;")
+    get_db().commit()
     cur.close()
     return {
         'id': newNodeId
     }
 
-def delNode(nodeId, owner):
+@app.delete(API_PREFIX + '/nodes/<nodeId>')
+def delNode(nodeId):
+    owner = request.args.get('owner')
     cur = get_db().cursor()
     cur.execute('''
-        DELETE FROM nodes WHERE id = ?, owner = ?;
+        DELETE FROM nodes WHERE id = ? AND owner = ?;
     ''', (nodeId, owner))
+    get_db().commit()
+    return ('', 204)
 
+@app.delete(API_PREFIX + '/graphs/<graphId>')
 def clearGraph(graphId):
     cur = get_db().cursor()
-    cur.executescript('''
-        BEGIN;
-        DELETE FROM nodes WHERE graph = ?;
-        DELETE FROM edges WHERE graph = ?;
-        COMMIT;
-    ''', (graphId, graphId))
+    cur.execute('''BEGIN;''')
+    cur.execute('''DELETE FROM nodes WHERE graph = ?;''', (graphId,))
+    cur.execute('''DELETE FROM edges WHERE graph = ?;''', (graphId,))
+    cur.execute('''DELETE FROM graphs WHERE id = ?;''', (graphId,))
+    cur.execute('''COMMIT;''')
+    get_db().commit()
     cur.close()
-    return ("", 200)
+    return ('', 204)
 
 @app.put(API_PREFIX + '/graphs/<graphId>/nodes/<nodeId>')
 def updateNode(graphId, nodeId):
@@ -96,8 +115,11 @@ def updateNode(graphId, nodeId):
     cur.execute("""
         UPDATE nodes
         SET pos_x = ?, pos_y = ?
-        WHERE id = ?, graph = ?;
+        WHERE id = ? AND graph = ?;
     """, (data['x'], data['y'], nodeId, graphId))
+    get_db().commit()
+    cur.close()
+    return ('', 204)
 
 @app.get(API_PREFIX + '/users/<username>')
 def getUser(username):
@@ -106,6 +128,7 @@ def getUser(username):
         SELECT id, username FROM users WHERE username = ?;
     """, (username,))
     row = res.fetchone()
+    get_db().commit()
     cur.close()
     if row is None:
         return ("User not found", 404)
@@ -115,37 +138,50 @@ def getUser(username):
         'username': username,
     }
 
-# Make this take multiple nodeIds (with list?? idk)
+@app.get(API_PREFIX + '/graphs/<graphId>/nodes')
 def getNodes(graphId):
     cur = get_db().cursor()
     res = cur.execute('''
         SELECT id, graph, name, pos_x, pos_y FROM nodes WHERE graph = ?;
     ''', (graphId,))
     nodeList = res.fetchall()
+    get_db().commit()
+    cur.close()
     if nodeList is None:
-        return None
-    nodeList = [{'x': x, 'y': y, 'name': name} for x, y, name in nodeList]
-    return nodeList
+        nodeList = []
+    nodeList = [{'id': id, 'x': x, 'y': y, 'name': name} 
+                for id, _, name, x, y in nodeList]
+    return {'nodes': nodeList}
 
-# Same as getNodes, make this take multiple edgeIds
+@app.get(API_PREFIX + '/graphs/<graphId>/edges')
 def getEdges(graphId):
     cur = get_db().cursor()
     res = cur.execute('''
-        SELECT id, graph, src, dst FROM nodes WHERE graph = ?;
+        SELECT id, graph, src, dst FROM edges WHERE graph = ?;
     ''', (graphId,))
     edgeList = res.fetchall()
+    get_db().commit()
+    cur.close()
     if edgeList is None:
-        return None
-    edgeList = [{'id': edgeId, 'src':src, 'dst':dst} for edgeId, src, dst in edgeList]
-    return edgeList
+        edgeList = []
+    edgeList = [{'id': edgeId, 'src': src, 'dst': dst} 
+                for edgeId, _, src, dst in edgeList]
+    return {'edges': edgeList}
 
+@app.get(API_PREFIX + '/graphs/<graphId>')
 def getNodesAndEdges(graphId):
+    nodes = getNodes(graphId)
+    edges = getEdges(graphId)
+    if isinstance(nodes, tuple):
+        return nodes
+    if isinstance(edges, tuple):
+        return edges
     return {
-        'nodes': getNodes(graphId),
-        'edges': getEdges(graphId)
+        'nodes': nodes['nodes'],
+        'edges': edges['edges']
     }
 
-@app.post(API_PREFIX + '/users/')
+@app.post(API_PREFIX + '/users')
 def addUser():
     data = request.json
     cur = get_db().cursor()
@@ -153,65 +189,102 @@ def addUser():
         cur.execute('''
             INSERT INTO users (username, password) VALUES (?, ?);
         ''', (data['username'], data['password']))
+        get_db().commit()
     except sqlite3.Error:
         return ("Error inserting in database", 500)
-    cur.close()
     get_db().commit()
-    return ('', 200)
+    cur.close()
+    return ('', 201)
 
-def addGraph(name, owner):
+@app.post(API_PREFIX + '/graphs')
+def addGraph():
+    data = request.json
+    name = data.get('name')
+    owner = data.get('owner')
     cur = get_db().cursor()
     cur.execute('''
         INSERT INTO graphs (name, owner) VALUES (?, ?);
-''', (name, owner))
+    ''', (name, owner))
+    get_db().commit()
+    cur.close()
+    return ('', 201)
 
-def delUser(id, username, password):
+@app.delete(API_PREFIX + '/users/<username>')
+def delUser(username):
     cur = get_db().cursor()
     cur.execute('''
-        DELETE FROM users WHERE id = ?, username = ?, password = ?;
-''', (id, username, password))
+        DELETE FROM users WHERE username = ?;
+    ''', (username))
+    get_db().commit()
+    cur.close()
+    return ('', 204)
+
+@app.delete(API_PREFIX + '/graphs/<graphId>')
+def delGraph(graphId):
+    cur = get_db().cursor()
+    cur.execute('''
+        DELETE FROM graphs WHERE id = ?;
+    ''', (graphId))
+    get_db().commit()
+    cur.close()
+    return ('', 204)
+
+# @app.delete(API_PREFIX + '/graphs')
+# def clearAllGraphs():
+#     cur = get_db().cursor()
+#     cur.execute('''
+#         DELETE FROM graphs WHERE owner = ?
+#     ''', (owner,))
+#     get_db().commit()
+#     return ('', 204)
+
+@app.post(API_PREFIX + '/graphs/<graphId>/edges')
+def addEdge(graphId):
+    data = request.json
+    src = data.get('src')
+    dst = data.get('dst')
     
-def delGraph(name, owner):
-    cur = get_db().cursor()
-    cur.execute('''
-        DELETE FROM graphs WHERE name = ?, owner = ?;
-''', (name, owner))
-
-def clearAllGraphs(owner):
-    cur = get_db().cursor()
-    cur.execute('''
-        DELETE FROM graphs where owner = ?
-''', (owner,))
-
-def addEdge(id, graph, src, dst):
     cur = get_db().cursor()
     cur.execute("BEGIN;")
-    res = cur.execute("SELECT COUNT(id) FROM edges WHERE graph = ? AND src = ? AND dst = ?", (id, src, dst))
+    res = cur.execute("SELECT COUNT(id) FROM edges WHERE graph = ? AND src = ? AND dst = ?;", 
+                     (graphId, src, dst))
     if res.fetchone()[0] != 0:
         cur.execute("ROLLBACK;")
-        return None
+        get_db().commit()
+        cur.close()
+        return ('Edge already exists', 400)
+    
     cur.execute('''
-    INSERT INTO edges (graph, name, pos_x, pos_y) VALUES (?, ?, ?, ?);
-    ''', (id, graph, src, dst))
+    INSERT INTO edges (graph, src, dst) VALUES (?, ?, ?);
+    ''', (graphId, src, dst))
+    new_id = cur.lastrowid
     cur.execute("COMMIT;")
-    return(cur.lastrowid)
+    get_db().commit()
+    cur.close()
+    return ({ 'id': new_id }, 201)
 
-def delEdge(node):
+@app.delete(API_PREFIX + '/edges/<edgeId>')
+def delEdge(edgeId):
     cur = get_db().cursor()
     cur.execute('''
-        DELETE FROM edges WHERE src = ? OR dst = ?
-''', (node, node))
+        DELETE FROM edges WHERE id = ?;
+    ''', (edgeId))
+    get_db().commit()
+    return ('', 204)
 
-def getGraphs(username):
+@app.get(API_PREFIX + '/graphs')
+def getGraphs():
+    # username = request.args.get('username')
     cur = get_db().cursor()
     res = cur.execute('''
-        SELECT id, name, owner FROM graphs WHERE owner = ?;
-    ''', (username,))
+        SELECT id, name, owner FROM graphs;
+    ''')
     graphList = res.fetchall()
     if graphList is None:
-        return None
-    graphList = [{'id': graphId, 'name':name, 'owner':owner} for graphId, name, owner in graphList]
-    return graphList
+        graphList = []
+    graphList = [{'id': graphId, 'name': name, 'owner': owner} 
+                 for graphId, name, owner in graphList]
+    return {'graphs': graphList}
 
 def exe_query(func, params:tuple = None):
     try:
@@ -221,11 +294,6 @@ def exe_query(func, params:tuple = None):
         return('OK', 200)
     except:
         return ('', 400)
-
-print(*(1,2,3,4))
-
-# with app.app_context():
-#     addUser('testUser', 'alksjdflkjasf')
-#     testUserId = getUser('testUser')['username']
-#     addGraph('graph1', testUserId)
-#     getGraphs('testUser')
+    
+if __name__ == '__main__':
+    app.run(debug=True)
